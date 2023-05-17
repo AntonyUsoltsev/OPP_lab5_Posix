@@ -2,53 +2,136 @@
 #include <pthread.h>
 #include <mpi.h>
 #include <vector>
+#include <cmath>
+#include <queue>
 
 constexpr int RANK_ROOT = 0;
-constexpr int FAIL = 0;
-constexpr int SUCCESS = 1;
-constexpr int REQUEST_TAG = 2;
-constexpr int ANSWER_TAG = 3;
-constexpr int NEED_TASKS = 4;
+constexpr int SEND_TASK = 3;
+constexpr int NEED_TASK = 4;
 constexpr int TURN_OFF = 5;
 constexpr int TASKS_IN_LIST = 200;
 constexpr int L = 1000;
 constexpr int ITERATION = 16;
 
-pthread_mutex_t mutex;
-
 typedef struct {
     int repeat_num;
 } task;
 
+typedef struct {
+    int ITER_COUNT;
+    int TASK_ON_ITER;
+    bool ITER_CONTINUE;
+    bool THREAD_SHUTDOWN;
+    int RANK;
+    int SIZE;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond_queue_fill;
+    pthread_cond_t cond_queue_empty;
+    pthread_cond_t cond_need_task;
+    std::queue<task> task_queue;
+} Context;
+
 void *sender_thread(void *arg) {
-    auto *tasks = static_cast<std::vector<task> *>(arg);
-//    for (int dest = 0; dest < tasks->size(); ++dest) {
-//        if (dest != RANK_ROOT) {
-//            MPI_Send(&((*tasks)[dest]), sizeof(task), MPI_BYTE, dest, 0, MPI_COMM_WORLD);
-//        }
-//    }
-    pthread_exit(nullptr);
-}
+    auto *context = (Context *) arg;
 
-void *reciver_thread(void *arg) {
-    auto one_task = (task *) (arg);
-
-//    for (int dest = 0; dest < tasks->size(); ++dest) {
-//        if (dest != RANK_ROOT) {
-//            MPI_Send(&((*tasks)[dest]), sizeof(task), MPI_BYTE, dest, 0, MPI_COMM_WORLD);
-//        }
-//
-//    }
-    pthread_exit(nullptr);
-}
-
-void *executor_thread(void *arg) {
-    auto one_task = *(task *) (arg);
-    for (int i = 0; i < one_task.repeat_num; i++) {
+    while (true) {
+        MPI_Status status;
+        MPI_Recv(nullptr, 0, MPI_INT, MPI_ANY_SOURCE, NEED_TASK, MPI_COMM_WORLD, &status);
+        std::cout << " recv";
+        int sender = status.MPI_SOURCE;
+        if (context->task_queue.empty()) {
+            int notask = -1;
+            MPI_Send(&notask, 1, MPI_INT, sender, SEND_TASK, MPI_COMM_WORLD);
+        } else {
+            pthread_mutex_lock(&context->mutex);
+            int rep_num = context->task_queue.front().repeat_num;
+            context->task_queue.pop();
+            pthread_mutex_unlock(&context->mutex);
+            MPI_Send(&rep_num, 1, MPI_INT, sender, SEND_TASK, MPI_COMM_WORLD);
+        }
 
     }
 }
 
+void *reciver_thread(void *arg) {
+    auto *context = (Context *) arg;
+
+    while (true) {
+
+        pthread_mutex_unlock(&context->mutex);
+        while (!context->task_queue.empty()) {
+            pthread_cond_wait(&context->cond_queue_empty, &context->mutex);
+        }
+        pthread_mutex_unlock(&context->mutex);
+
+        for (int i = 0; i < context->SIZE; i++) {
+            if (i == context->RANK) {
+                continue;
+            }
+            MPI_Send(nullptr, 0, MPI_INT, i, NEED_TASK, MPI_COMM_WORLD);
+        }
+
+        for (int i = 0; i < context->SIZE; i++) {
+            if (i == context->RANK) {
+                continue;
+            }
+            int recv_repeat_num;
+            MPI_Recv(&recv_repeat_num, 1, MPI_INT, i, SEND_TASK, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            if (recv_repeat_num == -1) {
+                continue;
+            }
+            pthread_mutex_lock(&context->mutex);
+            context->task_queue.push({.repeat_num = recv_repeat_num});
+            pthread_mutex_unlock(&context->mutex);
+        }
+        if (context->task_queue.empty()) {
+            context->ITER_CONTINUE = false;
+        } else {
+            pthread_mutex_lock(&context->mutex);
+            pthread_cond_signal(&context->cond_queue_fill);
+            pthread_mutex_unlock(&context->mutex);
+        }
+    }
+}
+
+void *executor_thread(void *arg) {
+    auto *context = (Context *) arg;
+    for (int i = 0; i < context->ITER_COUNT; ++i) {
+        pthread_mutex_lock(&context->mutex);
+        for (int j = 0; j < context->TASK_ON_ITER; ++j) {
+            context->task_queue.push({.repeat_num = (context->RANK + 1) * (j + 1)});
+            std::cout << context->task_queue.back().repeat_num << " ";
+        }
+        pthread_mutex_unlock(&context->mutex);
+
+        while (true) {
+            if (!context->ITER_CONTINUE) {
+                break;
+            }
+            pthread_mutex_unlock(&context->mutex);
+            while (context->task_queue.empty()) {
+                pthread_cond_wait(&context->cond_queue_fill, &context->mutex);
+            }
+            pthread_mutex_unlock(&context->mutex);
+
+            pthread_mutex_lock(&context->mutex);
+            task one_task = context->task_queue.front();
+            context->task_queue.pop();
+            pthread_mutex_unlock(&context->mutex);
+
+            double res = 0;
+            for (int j = 0; j < one_task.repeat_num; ++j) {
+                res += sqrt(j);
+            }
+            std::cout << res << std::endl;
+
+            pthread_mutex_lock(&context->mutex);
+            pthread_cond_signal(&context->cond_queue_empty);
+            pthread_mutex_unlock(&context->mutex);
+        }
+    }
+    context->THREAD_SHUTDOWN = true;
+}
 
 
 int main(int argc, char **argv) {
@@ -62,29 +145,36 @@ int main(int argc, char **argv) {
     int size, rank;
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    std::vector<task> Tasks;
-    if (rank == RANK_ROOT) {
-        Tasks.resize(size * 4);
-        for (int i = 0; i < Tasks.size(); ++i) {
-            Tasks[i].repeat_num = i + 1;
-        }
+    pthread_t send_thread, recv_thread, exec_thread;
+    Context context = {
+            .ITER_COUNT = 10,
+            .TASK_ON_ITER = 10,
+            .ITER_CONTINUE = true,
+            .RANK = rank,
+            .SIZE = size
+    };
+    pthread_mutex_init(&context.mutex, nullptr);
 
-        pthread_t send_thread;
-        pthread_create(&send_thread, nullptr, sender_thread, static_cast<void *>(&Tasks));
-    } else {
-        task one_task;
-        pthread_t recv_thread;
-        pthread_create(&recv_thread, nullptr, reciver_thread, static_cast<void *>(&one_task));
-    }
+    pthread_attr_t attrs;
+    pthread_attr_init(&attrs);
+    pthread_attr_setdetachstate(&attrs, PTHREAD_CREATE_JOINABLE);
+    pthread_create(&exec_thread, &attrs, executor_thread, static_cast<void *>(&context));
+    pthread_create(&recv_thread, &attrs, reciver_thread, static_cast<void *>(&context));
+    pthread_create(&send_thread, &attrs, sender_thread, static_cast<void *>(&context));
+    pthread_attr_destroy(&attrs);
+
+    pthread_condattr_t condattrs;
+
+    pthread_condattr_init(&condattrs);
+    pthread_cond_init(&context.cond_queue_empty, &condattrs);
+    pthread_cond_init(&context.cond_queue_fill, &condattrs);
+    pthread_condattr_destroy(&condattrs);
 
 
+    pthread_join(exec_thread, nullptr);
+    pthread_join(recv_thread, nullptr);
+    pthread_join(send_thread, nullptr);
 
-//    int result = pthread_create(&thread, nullptr, threadFunction, nullptr);
-//    if (result != 0) {
-//        std::cerr << "Error while creating thread" << std::endl;
-//        return 1;
-//    }
-//    pthread_join(thread, nullptr);
     return 0;
 }
 
