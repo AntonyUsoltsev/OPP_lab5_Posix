@@ -4,66 +4,84 @@
 #include <cmath>
 #include <queue>
 
+
 constexpr int RANK_ROOT = 0;
 constexpr int SEND_TASK = 1;
 constexpr int NEED_TASK = 2;
 constexpr int TURN_OFF = 3;
+constexpr int ITER_COUNT = 10;
+constexpr int TASK_ON_ITER = 10;
+
+pthread_mutex_t mutex;
+pthread_cond_t cond_queue_fill;
+pthread_cond_t cond_queue_empty;
 
 typedef struct {
     int repeat_num;
 } task;
 
+
+class taskQueue {
+public:
+    std::queue<task> queue;
+
+    void push(const task task_) {
+        pthread_mutex_lock(&mutex);
+        queue.push(task_);
+        pthread_mutex_unlock(&mutex);
+    }
+
+    task pop() {
+        pthread_mutex_lock(&mutex);
+        task item = queue.front();
+        queue.pop();
+        pthread_mutex_unlock(&mutex);
+        return item;
+    }
+
+};
+
 typedef struct {
-    int ITER_COUNT;
-    int TASK_ON_ITER;
     bool ITER_CONTINUE;
     bool THREAD_SHUTDOWN;
+    int CUR_ITER;
     int RANK;
     int SIZE;
-    pthread_mutex_t mutex;
-    pthread_cond_t cond_queue_fill;
-    pthread_cond_t cond_queue_empty;
-    std::queue<task> task_queue;
+    taskQueue task_queue;
 } Context;
+
 
 void *sender_thread(void *arg) {
     auto *context = (Context *) arg;
-
-    while (true) {
-        if (context->THREAD_SHUTDOWN) {
-            pthread_exit(nullptr);
-        }
+    while (context->CUR_ITER != ITER_COUNT && context->SIZE != 1) {
         MPI_Status status;
         MPI_Recv(nullptr, 0, MPI_INT, MPI_ANY_SOURCE, NEED_TASK, MPI_COMM_WORLD, &status);
-     //   std::cout << " recv";
+        //   std::cout << " recv";
         int sender = status.MPI_SOURCE;
-        if (context->task_queue.empty()) {
+        if (context->task_queue.queue.empty()) {
             int notask = -1;
             MPI_Send(&notask, 1, MPI_INT, sender, SEND_TASK, MPI_COMM_WORLD);
         } else {
-            pthread_mutex_lock(&context->mutex);
-            int rep_num = context->task_queue.front().repeat_num;
-            context->task_queue.pop();
-            pthread_mutex_unlock(&context->mutex);
+            int rep_num = context->task_queue.pop().repeat_num;
             MPI_Send(&rep_num, 1, MPI_INT, sender, SEND_TASK, MPI_COMM_WORLD);
         }
-
     }
+    pthread_exit(nullptr);
 }
 
 void *reciver_thread(void *arg) {
     auto *context = (Context *) arg;
 
-    while (true) {
+    while (context->CUR_ITER != ITER_COUNT) {
         if (context->THREAD_SHUTDOWN) {
             pthread_exit(nullptr);
         }
 
-        pthread_mutex_lock(&context->mutex);
-        while (!context->task_queue.empty() || !context->ITER_CONTINUE ) {
-            pthread_cond_wait(&context->cond_queue_empty, &context->mutex);
+        pthread_mutex_lock(&mutex);
+        while (!context->task_queue.queue.empty() || !context->ITER_CONTINUE) {
+            pthread_cond_wait(&cond_queue_empty, &mutex);
         }
-        pthread_mutex_unlock(&context->mutex);
+        pthread_mutex_unlock(&mutex);
 
         for (int i = 0; i < context->SIZE; i++) {
             if (i == context->RANK) {
@@ -81,75 +99,67 @@ void *reciver_thread(void *arg) {
             if (recv_repeat_num == -1) {
                 continue;
             }
-            pthread_mutex_lock(&context->mutex);
-            context->task_queue.push({.repeat_num = recv_repeat_num});
-            pthread_mutex_unlock(&context->mutex);
-        }
-        if (context->task_queue.empty()) {
-            pthread_mutex_lock(&context->mutex);
-            context->ITER_CONTINUE = false;
-            pthread_mutex_unlock(&context->mutex);
-        }
-        pthread_mutex_lock(&context->mutex);
-        pthread_cond_signal(&context->cond_queue_fill);
-        pthread_mutex_unlock(&context->mutex);
 
+            context->task_queue.push({.repeat_num = recv_repeat_num});
+
+        }
+        if (context->task_queue.queue.empty()) {
+            pthread_mutex_lock(&mutex);
+            context->ITER_CONTINUE = false;
+            pthread_mutex_unlock(&mutex);
+        }
+        pthread_mutex_lock(&mutex);
+        pthread_cond_signal(&cond_queue_fill);
+        pthread_mutex_unlock(&mutex);
     }
+    pthread_exit(nullptr);
 }
 
 void *executor_thread(void *arg) {
     auto *context = (Context *) arg;
-    for (int i = 0; i < context->ITER_COUNT; ++i) {
+    double global_res = 0;
+    for (int i = 0; i < ITER_COUNT; ++i) {
         MPI_Barrier(MPI_COMM_WORLD);
-        std::cout<<"I: " << i << '\n';
-        pthread_mutex_lock(&context->mutex);
-        for (int j = 0; j < context->TASK_ON_ITER; ++j) {
-            context->task_queue.push({.repeat_num = (context->RANK + 1) * (j + 1)});
-            std::cout << context->task_queue.back().repeat_num << " ";
-        }
-        pthread_mutex_unlock(&context->mutex);
 
-        pthread_mutex_lock(&context->mutex);
+        for (int j = 0; j < TASK_ON_ITER * (context->RANK + 1) * 2; ++j) {
+            context->task_queue.push({.repeat_num = (context->RANK + 1) * (j + 1)});
+            //  std::cout << context->task_queue.queue.back().repeat_num << " ";
+        }
+
+        pthread_mutex_lock(&mutex);
         context->ITER_CONTINUE = true;
-        pthread_mutex_unlock(&context->mutex);
+        pthread_mutex_unlock(&mutex);
         while (true) {
-//            if (!context->ITER_CONTINUE) {
-//                break;
-//            }
-       //     std::cout<<"iter ";
-            pthread_mutex_lock(&context->mutex);
-            while (context->task_queue.empty() && context->ITER_CONTINUE) {
-                //   std::cout<< "empty\n";
-                pthread_cond_wait(&context->cond_queue_fill, &context->mutex);
+            pthread_mutex_lock(&mutex);
+            while (context->task_queue.queue.empty() && context->ITER_CONTINUE) {
+                pthread_cond_wait(&cond_queue_fill, &mutex);
             }
-            pthread_mutex_unlock(&context->mutex);
-            //   std::cout<<"aft empty\n";
+            pthread_mutex_unlock(&mutex);
             if (!context->ITER_CONTINUE) {
                 break;
             }
-            pthread_mutex_lock(&context->mutex);
-            task one_task = context->task_queue.front();
-            context->task_queue.pop();
-            pthread_mutex_unlock(&context->mutex);
+
+            task one_task = context->task_queue.pop();
 
             double res = 0;
             for (int j = 0; j < one_task.repeat_num; ++j) {
                 res += sqrt(j);
             }
-            std::cout << res << " ";
-
-            pthread_mutex_lock(&context->mutex);
-            pthread_cond_signal(&context->cond_queue_empty);
-            pthread_mutex_unlock(&context->mutex);
+            std::cout << "Rank: " << context->RANK << " i:" << i << " rep num " << one_task.repeat_num << " res: "
+                      << res << "\n";
+            pthread_mutex_lock(&mutex);
+            pthread_cond_signal(&cond_queue_empty);
+            pthread_mutex_unlock(&mutex);
         }
-        std::cout << "aft while "<<i<<"\n";
+        context->CUR_ITER++;
+        std::cout << std::endl;
 
     }
 
-    std::cout<<"iter end";
-    pthread_mutex_lock(&context->mutex);
-    context->THREAD_SHUTDOWN = true;
-    pthread_mutex_unlock(&context->mutex);
+    fflush(stdout);
+//    pthread_mutex_lock(&mutex);
+//    context->THREAD_SHUTDOWN = true;
+//    pthread_mutex_unlock(&mutex);
     pthread_exit(nullptr);
 }
 
@@ -167,18 +177,17 @@ int main(int argc, char **argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     pthread_t send_thread, recv_thread, exec_thread;
     Context context = {
-            .ITER_COUNT = 15,
-            .TASK_ON_ITER = 10,
             .ITER_CONTINUE = true,
+            .CUR_ITER = 1,
             .RANK = rank,
             .SIZE = size
     };
-    pthread_mutex_init(&context.mutex, nullptr);
+    pthread_mutex_init(&mutex, nullptr);
     pthread_condattr_t condattrs;
 
     pthread_condattr_init(&condattrs);
-    pthread_cond_init(&context.cond_queue_empty, &condattrs);
-    pthread_cond_init(&context.cond_queue_fill, &condattrs);
+    pthread_cond_init(&cond_queue_empty, &condattrs);
+    pthread_cond_init(&cond_queue_fill, &condattrs);
     pthread_condattr_destroy(&condattrs);
 
     pthread_attr_t attrs;
@@ -192,10 +201,11 @@ int main(int argc, char **argv) {
     pthread_join(exec_thread, nullptr);
     pthread_join(recv_thread, nullptr);
     pthread_join(send_thread, nullptr);
-    std::cout << "end";
-    pthread_mutex_destroy(&context.mutex);
-    pthread_cond_destroy(&context.cond_queue_empty);
-    pthread_cond_destroy(&context.cond_queue_fill);
+    std::cout << "All_end";
+    fflush(stdout);
+    pthread_mutex_destroy(&mutex);
+    pthread_cond_destroy(&cond_queue_empty);
+    pthread_cond_destroy(&cond_queue_fill);
 
     return 0;
 }
