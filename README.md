@@ -2,7 +2,7 @@
 
 Compile command:
 
-    mpicxx main.c -o main -Wpedantic -Werror -Wall -O3 --std=c++11
+    mpicxx main.cpp -o main -Wpedantic -Werror -Wall -O3 --std=c++11
 
 Run command:
 
