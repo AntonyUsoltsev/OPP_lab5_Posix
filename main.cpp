@@ -9,6 +9,7 @@ constexpr int RANK_ROOT = 0;
 constexpr int SEND_TASK = 1;
 constexpr int NEED_TASK = 2;
 constexpr int SHUTDOWN = -3;
+constexpr int ALL_TASK_COUNT = 1024;
 
 typedef struct {
     int repeat_num;
@@ -47,27 +48,13 @@ void *sender_thread(void *arg) {
             if (recv_buff == SHUTDOWN) {
                 break;
             }
-
             int sender = status.MPI_SOURCE;
             pthread_mutex_lock(&context->mutex);
             int rep_num = pop(context->task_queue);
             pthread_mutex_unlock(&context->mutex);
-
-            //std::cout << "send rep num " << rep_num << " from:" << context->RANK << " to:" << sender << std::endl;
-
             MPI_Send(&rep_num, 1, MPI_INT, sender, SEND_TASK, MPI_COMM_WORLD);
         }
     }
-    // int shutdown = SHUTDOWN;
-    // MPI_Send(&shutdown, 1, MPI_INT, (context->RANK + 1) % context->SIZE, SEND_TASK, MPI_COMM_WORLD);
-
-//    for (int i = 0; i < context->SIZE; i++) {
-//        if (i == context->RANK) {
-//            continue;
-//        }
-//        int shutdown = SHUTDOWN;
-//        MPI_Send(&shutdown, 1, MPI_INT, i, SEND_TASK, MPI_COMM_WORLD);
-//    }
     pthread_exit(nullptr);
 }
 
@@ -80,10 +67,10 @@ void *executor_thread(void *arg) {
         int task_solved = 0;
         pthread_mutex_lock(&context->mutex);
         for (int j = 0; j < context->TASK_ON_ITER; ++j) {
-            context->task_queue.push({.repeat_num = (context->RANK + 1) * 10 * (j + 1)});
+            context->task_queue.push({.repeat_num = (context->RANK*context->TASK_ON_ITER + j) *10});
+            //repeat_num = (context->RANK + 1) * 10 * (j + 1)
         }
         pthread_mutex_unlock(&context->mutex);
-
 
         while (true) {
             pthread_mutex_lock(&context->mutex);
@@ -98,9 +85,6 @@ void *executor_thread(void *arg) {
                 res += sqrt(j);
             }
             task_solved++;
-            //  pthread_mutex_lock(&context->mutex);
-            // context->out_file << " i:" << i << " rep num " << one_task_iter << " res: " << res << std::endl;
-            //pthread_mutex_unlock(&context->mutex);
         }
         while (true) {
             int recv_task_count = 0;
@@ -111,9 +95,7 @@ void *executor_thread(void *arg) {
                 int send_buff = 0, recv_repeat_num = 0;
                 MPI_Send(&send_buff, 1, MPI_INT, j, NEED_TASK, MPI_COMM_WORLD);
                 MPI_Recv(&recv_repeat_num, 1, MPI_INT, j, SEND_TASK, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                pthread_mutex_lock(&context->mutex);
-                // std::cout << "recv rep num " << recv_repeat_num << " from:" << j << " in:" << context->RANK << std::endl;
-                pthread_mutex_unlock(&context->mutex);
+
                 if (recv_repeat_num == -1) {
                     continue;
                 }
@@ -123,26 +105,18 @@ void *executor_thread(void *arg) {
                     for (int k = 0; k < recv_repeat_num; ++k) {
                         res += sqrt(k);
                     }
-                    // pthread_mutex_lock(&context->mutex);
-                    // context->out_file << " i:" << i << " rep num " << recv_repeat_num << " res: " << res << std::endl;
-                    // pthread_mutex_unlock(&context->mutex);
                     task_solved++;
                 }
-
             }
             if (recv_task_count == 0) {
                 break;
             }
         }
-
         MPI_Barrier(MPI_COMM_WORLD);
         context->out_file << "Task solved: " << task_solved << " on iter:" << i << " in process:" << context->RANK << std::endl;
     }
 
-
-    int shutdown = SHUTDOWN;
-    MPI_Send(&shutdown, 1, MPI_INT, context->RANK, NEED_TASK, MPI_COMM_WORLD);
-    std::cout << "iter end in proc:" << context->RANK << std::endl;
+    MPI_Send(&SHUTDOWN, 1, MPI_INT, context->RANK, NEED_TASK, MPI_COMM_WORLD);
     pthread_exit(nullptr);
 }
 
@@ -163,7 +137,7 @@ int main(int argc, char **argv) {
             .RANK = rank,
             .SIZE = size,
             .ITER_COUNT = 10,
-            .TASK_ON_ITER = 100
+            .TASK_ON_ITER = ALL_TASK_COUNT / size
     };
 
     std::string file = "info" + std::to_string(rank) + ".txt";

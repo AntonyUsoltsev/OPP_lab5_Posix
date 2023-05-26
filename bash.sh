@@ -1,4 +1,5 @@
 # shellcheck disable=SC1073
+mpicxx main.cpp -o main
 for i in {1..20}
 do
      echo "start on 2 proc, iter № $i"
