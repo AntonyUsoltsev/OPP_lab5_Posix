@@ -38,27 +38,6 @@ int pop(std::queue<task> &queue) {
     }
 }
 
-void *sender_thread(void *arg) {
-    auto *context = (Context *) arg;
-    if (context->SIZE != 1) {
-        while (true) {
-            MPI_Status status;
-            int recv_buff;
-            MPI_Recv(&recv_buff, 1, MPI_INT, MPI_ANY_SOURCE, NEED_TASK, MPI_COMM_WORLD, &status);
-            if (recv_buff == SHUTDOWN) {
-                break;
-            }
-            int sender = status.MPI_SOURCE;
-            pthread_mutex_lock(&context->mutex);
-            int rep_num = pop(context->task_queue);
-            pthread_mutex_unlock(&context->mutex);
-            MPI_Send(&rep_num, 1, MPI_INT, sender, SEND_TASK, MPI_COMM_WORLD);
-        }
-    }
-    pthread_exit(nullptr);
-}
-
-
 void *executor_thread(void *arg) {
     auto *context = static_cast<Context *>(arg);
 
@@ -85,36 +64,8 @@ void *executor_thread(void *arg) {
             }
             task_solved++;
         }
-        while (true) {
-            int recv_task_count = 0;
-            for (int j = 0; j < context->SIZE; j++) {
-                if (j == context->RANK) {
-                    continue;
-                }
-                int send_buff = 0, recv_repeat_num = 0;
-                MPI_Send(&send_buff, 1, MPI_INT, j, NEED_TASK, MPI_COMM_WORLD);
-                MPI_Recv(&recv_repeat_num, 1, MPI_INT, j, SEND_TASK, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-                if (recv_repeat_num == -1) {
-                    continue;
-                } else {
-                    recv_task_count++;
-                    double res = 0;
-                    for (int k = 0; k < recv_repeat_num; ++k) {
-                        res += sqrt(k);
-                    }
-                    task_solved++;
-                }
-            }
-            if (recv_task_count == 0) {
-                break;
-            }
-        }
-        //MPI_Barrier(MPI_COMM_WORLD);
-        //context->out_file << "Task solved: " << task_solved << " on iter:" << i << " in process:" << context->RANK << std::endl;
     }
-
-    MPI_Send(&SHUTDOWN, 1, MPI_INT, context->RANK, NEED_TASK, MPI_COMM_WORLD);
     pthread_exit(nullptr);
 }
 
@@ -138,22 +89,21 @@ int main(int argc, char **argv) {
             .TASK_ON_ITER = ALL_TASK_COUNT / size
     };
 
-   // std::string file = "./logs/info" + std::to_string(rank) + ".txt";
+    // std::string file = "./logs/info" + std::to_string(rank) + ".txt";
     //context.out_file.open(file, std::ios::out);
 
     pthread_mutex_init(&context.mutex, nullptr);
 
     pthread_attr_t attrs;
-    pthread_t send_thread, exec_thread;
+    pthread_t exec_thread;
     pthread_attr_init(&attrs);
     pthread_attr_setdetachstate(&attrs, PTHREAD_CREATE_JOINABLE);
+
     double start = MPI_Wtime();
     pthread_create(&exec_thread, &attrs, executor_thread, static_cast<void *>(&context));
-    pthread_create(&send_thread, &attrs, sender_thread, static_cast<void *>(&context));
-
     pthread_join(exec_thread, nullptr);
-    pthread_join(send_thread, nullptr);
     double end = MPI_Wtime();
+
     if (rank == RANK_ROOT) {
         std::cout <<"Time: "<< end - start << std::endl;
     }
