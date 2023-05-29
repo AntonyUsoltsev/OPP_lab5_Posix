@@ -63,7 +63,6 @@ void *executor_thread(void *arg) {
     auto *context = static_cast<Context *>(arg);
 
     for (int i = 0; i < context->ITER_COUNT; ++i) {
-        MPI_Barrier(MPI_COMM_WORLD);
         int task_solved = 0;
         pthread_mutex_lock(&context->mutex);
         for (int j = 0; j < context->TASK_ON_ITER; ++j) {
@@ -110,8 +109,8 @@ void *executor_thread(void *arg) {
                 break;
             }
         }
-        //MPI_Barrier(MPI_COMM_WORLD);
-        //context->out_file << "Task solved: " << task_solved << " on iter:" << i << " in process:" << context->RANK << std::endl;
+        MPI_Barrier(MPI_COMM_WORLD);
+//        context->out_file << "Task solved: " << task_solved << " on iter:" << i << " in process:" << context->RANK << std::endl;
     }
 
     MPI_Send(&SHUTDOWN, 1, MPI_INT, context->RANK, NEED_TASK, MPI_COMM_WORLD);
@@ -134,12 +133,12 @@ int main(int argc, char **argv) {
     Context context = {
             .RANK = rank,
             .SIZE = size,
-            .ITER_COUNT = 50,
+            .ITER_COUNT = 30,
             .TASK_ON_ITER = ALL_TASK_COUNT / size
     };
 
-   // std::string file = "./logs/info" + std::to_string(rank) + ".txt";
-    //context.out_file.open(file, std::ios::out);
+//    std::string file = "./logs/info" + std::to_string(rank) + ".txt";
+//    context.out_file.open(file, std::ios::out);
 
     pthread_mutex_init(&context.mutex, nullptr);
 
@@ -147,6 +146,7 @@ int main(int argc, char **argv) {
     pthread_t send_thread, exec_thread;
     pthread_attr_init(&attrs);
     pthread_attr_setdetachstate(&attrs, PTHREAD_CREATE_JOINABLE);
+
     double start = MPI_Wtime();
     pthread_create(&exec_thread, &attrs, executor_thread, static_cast<void *>(&context));
     pthread_create(&send_thread, &attrs, sender_thread, static_cast<void *>(&context));
@@ -154,6 +154,7 @@ int main(int argc, char **argv) {
     pthread_join(exec_thread, nullptr);
     pthread_join(send_thread, nullptr);
     double end = MPI_Wtime();
+
     if (rank == RANK_ROOT) {
         std::cout <<"Time: "<< end - start << std::endl;
     }

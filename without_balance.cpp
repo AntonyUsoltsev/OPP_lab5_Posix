@@ -85,7 +85,7 @@ int main(int argc, char **argv) {
     Context context = {
             .RANK = rank,
             .SIZE = size,
-            .ITER_COUNT = 50,
+            .ITER_COUNT = 30,
             .TASK_ON_ITER = ALL_TASK_COUNT / size
     };
 
